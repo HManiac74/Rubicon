@@ -38,12 +38,16 @@ impl Editor {
         Self {reader: Reader, output: Output::new()}
     }
 
-    fn process_keypress(&self) -> crossterm::Result<bool> {
+    fn process_keypress(&mut self) -> crossterm::Result<bool> {
         match self.reader.read_key()? {
             KeyEvent {
                 code: KeyCode::Char('q'),
-                modifiers: event::KeyModifiers::CONTROL, ..
+                modifiers: KeyModifiers::CONTROL, ..
             } => return Ok(false),
+            KeyEvent {
+                code: direction @ (KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right),
+                modifiers: KeyModifiers::NONE, ..
+            } => self.output.move_cursor(direction),
             _ => {}
         }
         Ok(true)
@@ -58,12 +62,15 @@ impl Editor {
 struct Output {
     win_size: (usize, usize),
     editor_contents: EditorContents,
+    cursor_controller: CursorController
 }
 
 impl Output {
     fn new() -> Self {
         let win_size = terminal::size().map(|(x, y) | (x as usize, y as usize)).unwrap();
-        Self{win_size, editor_contents: EditorContents::new() }
+        Self{win_size, 
+            editor_contents: EditorContents::new(),
+            cursor_controller: CursorController::new(), }
     }
 
     fn clear_screen() -> crossterm::Result<()> {
@@ -74,7 +81,9 @@ impl Output {
     fn refresh_screen(&mut self) -> crossterm::Result<()> {
         queue!(self.editor_contents, cursor::Hide, cursor::MoveTo(0, 0))?;
         self.draw_rows();
-        queue!(self.editor_contents, cursor::MoveTo(0, 0), cursor::Show)?;
+        let cursor_x = self.cursor_controller.cursor_x;
+        let cursor_y = self.cursor_controller.cursor_y;
+        queue!(self.editor_contents, cursor::MoveTo(cursor_x as u16, cursor_y as u16), cursor::Show)?;
         self.editor_contents.flush()
     }
 
@@ -106,6 +115,10 @@ impl Output {
                 self.editor_contents.push_str("\r\n");
             }
         }
+    }
+
+    fn move_cursor(&mut self, direction: KeyCode) {
+        self.cursor_controller.move_cursor(direction);
     }
 }
 
@@ -144,6 +157,35 @@ impl io::Write for EditorContents {
         self.content.clear();
         out
     } 
+}
+
+struct CursorController {
+    cursor_x: usize,
+    cursor_y: usize,
+}
+
+impl CursorController {
+    fn new() -> CursorController {
+        Self { cursor_x: 0, cursor_y: 0 }
+    }
+
+    fn move_cursor(&mut self, direction: KeyCode) {
+        match direction {
+            KeyCode::Up => {
+                self.cursor_y -= 1;
+            }
+            KeyCode::Left => {
+                self.cursor_x -= 1;
+            }
+            KeyCode::Down => {
+                self.cursor_y += 1;
+            }
+            KeyCode::Right => {
+                self.cursor_x += 1;
+            }
+            _ => unimplemented!(),
+        }
+    }
 }
 
 fn main() -> crossterm::Result<()> {
