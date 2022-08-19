@@ -2,7 +2,7 @@ use crossterm::event::*;
 use crossterm::terminal::ClearType;
 use crossterm::{cursor, event, execute, queue, terminal};
 use std::fmt::format;
-use std::io::{stdout, Write, self};
+use std::io::{self, stdout, Write};
 use std::time::Duration;
 
 struct CleanUp;
@@ -35,18 +35,23 @@ struct Editor {
 
 impl Editor {
     fn new() -> Self {
-        Self {reader: Reader, output: Output::new()}
+        Self {
+            reader: Reader,
+            output: Output::new(),
+        }
     }
 
     fn process_keypress(&mut self) -> crossterm::Result<bool> {
         match self.reader.read_key()? {
             KeyEvent {
                 code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::CONTROL, ..
+                modifiers: KeyModifiers::CONTROL,
+                ..
             } => return Ok(false),
             KeyEvent {
                 code: direction @ (KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right),
-                modifiers: KeyModifiers::NONE, ..
+                modifiers: KeyModifiers::NONE,
+                ..
             } => self.output.move_cursor(direction),
             _ => {}
         }
@@ -62,15 +67,19 @@ impl Editor {
 struct Output {
     win_size: (usize, usize),
     editor_contents: EditorContents,
-    cursor_controller: CursorController
+    cursor_controller: CursorController,
 }
 
 impl Output {
     fn new() -> Self {
-        let win_size = terminal::size().map(|(x, y) | (x as usize, y as usize)).unwrap();
-        Self{win_size, 
+        let win_size = terminal::size()
+            .map(|(x, y)| (x as usize, y as usize))
+            .unwrap();
+        Self {
+            win_size,
             editor_contents: EditorContents::new(),
-            cursor_controller: CursorController::new(), }
+            cursor_controller: CursorController::new(win_size),
+        }
     }
 
     fn clear_screen() -> crossterm::Result<()> {
@@ -83,7 +92,11 @@ impl Output {
         self.draw_rows();
         let cursor_x = self.cursor_controller.cursor_x;
         let cursor_y = self.cursor_controller.cursor_y;
-        queue!(self.editor_contents, cursor::MoveTo(cursor_x as u16, cursor_y as u16), cursor::Show)?;
+        queue!(
+            self.editor_contents,
+            cursor::MoveTo(cursor_x as u16, cursor_y as u16),
+            cursor::Show
+        )?;
         self.editor_contents.flush()
     }
 
@@ -128,7 +141,9 @@ struct EditorContents {
 
 impl EditorContents {
     fn new() -> Self {
-        Self { content: String::new() }
+        Self {
+            content: String::new(),
+        }
     }
 
     fn push(&mut self, ch: char) {
@@ -141,7 +156,7 @@ impl EditorContents {
 }
 
 impl io::Write for EditorContents {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize>{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match std::str::from_utf8(buf) {
             Ok(s) => {
                 self.content.push_str(s);
@@ -156,32 +171,45 @@ impl io::Write for EditorContents {
         stdout().flush()?;
         self.content.clear();
         out
-    } 
+    }
 }
 
 struct CursorController {
     cursor_x: usize,
     cursor_y: usize,
+    screen_columns: usize,
+    screen_rows: usize,
 }
 
 impl CursorController {
-    fn new() -> CursorController {
-        Self { cursor_x: 0, cursor_y: 0 }
+    fn new(win_size: (usize, usize)) -> CursorController {
+        Self {
+            cursor_x: 0,
+            cursor_y: 0,
+            screen_columns: win_size.0,
+            screen_rows: win_size.1,
+        }
     }
 
     fn move_cursor(&mut self, direction: KeyCode) {
         match direction {
             KeyCode::Up => {
-                self.cursor_y -= 1;
+                self.cursor_y = self.cursor_y.saturating_sub(1);
             }
             KeyCode::Left => {
-                self.cursor_x -= 1;
+                if self.cursor_x != 0 {
+                    self.cursor_x -= 1;
+                }
             }
             KeyCode::Down => {
-                self.cursor_y += 1;
+                if self.cursor_y != self.screen_columns - 1 {
+                    self.cursor_y += 1;
+                }
             }
             KeyCode::Right => {
-                self.cursor_x += 1;
+                if self.cursor_x != self.screen_columns - 1 {
+                    self.cursor_x += 1;
+                }
             }
             _ => unimplemented!(),
         }
