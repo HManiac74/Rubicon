@@ -169,6 +169,13 @@ impl EditorRows {
             }
         }
     }
+
+    fn join_adjacent_rows(&mut self, at: usize) {
+        let current_row = self.row_contents.remove(at);
+        let previous_row = self.get_editor_row_mut(at - 1);
+        previous_row.row_content.push_str(&current_row.row_content);
+        Self::render_row(previous_row);
+    }
 }
 
 struct CursorController {
@@ -354,14 +361,26 @@ impl Output {
         if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
             return;
         }
+        if self.cursor_controller.cursor_y == 0 && self.cursor_controller.cursor_x == 0 {
+            return;
+        }
         let row = self
             .editor_rows
             .get_editor_row_mut(self.cursor_controller.cursor_y);
         if self.cursor_controller.cursor_x > 0 {
             row.delete_char(self.cursor_controller.cursor_x - 1);
             self.cursor_controller.cursor_x -= 1;
-            self.dirty += 1;
         }
+        else {
+            let previous_row_content = self
+                .editor_rows
+                .get_row(self.cursor_controller.cursor_y - 1);
+            self.cursor_controller.cursor_x = previous_row_content.len();
+            self.editor_rows
+                .join_adjacent_rows(self.cursor_controller.cursor_y);
+            self.cursor_controller.cursor_y -= 1;
+        }
+        self.dirty += 1;
     }
 
     fn insert_char(&mut self, ch: char) {
@@ -556,7 +575,7 @@ impl Editor {
                     .set_message(format!("{} bytes written to disk", len));
                 self.output.dirty = 0
             })?,
-             KeyEvent {
+            KeyEvent {
                 code: key @ (KeyCode::Backspace | KeyCode::Delete),
                 modifiers: KeyModifiers::NONE, ..
             } => {
