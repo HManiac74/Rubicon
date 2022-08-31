@@ -9,6 +9,7 @@ use std::{cmp, env, fs, io};
 
 const VERSION: &str = "0.8";
 const TAB_STOP: usize = 8;
+const QUIT_TIMES: u8 = 3;
 
 struct CleanUp;
 
@@ -66,6 +67,11 @@ impl Row {
 
     fn insert_char(&mut self, at: usize, ch: char) {
         self.row_content.insert(at, ch);
+        EditorRows::render_row(self)
+    }
+
+    fn delete_char(&mut self, at: usize) {
+        self.row_content.remove(at);
         EditorRows::render_row(self)
     }
 }
@@ -344,14 +350,30 @@ impl Output {
         }
     }
 
+    fn delete_char(&mut self) {
+        if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
+            return;
+        }
+        let row = self
+            .editor_rows
+            .get_editor_row_mut(self.cursor_controller.cursor_y);
+        if self.cursor_controller.cursor_x > 0 {
+            row.delete_char(self.cursor_controller.cursor_x - 1);
+            self.cursor_controller.cursor_x -= 1;
+            self.dirty += 1;
+        }
+    }
+
     fn insert_char(&mut self, ch: char) {
         if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
-            self.editor_rows.insert_row()
+            self.editor_rows.insert_row();
+            self.dirty += 1;
         }
         self.editor_rows
             .get_editor_row_mut(self.cursor_controller.cursor_y)
             .insert_char(self.cursor_controller.cursor_x, ch);
         self.cursor_controller.cursor_x += 1;
+        self.dirty += 1;
     }
 
     fn draw_status_bar(&mut self) {
@@ -395,7 +417,7 @@ impl Output {
             let file_row = i + self.cursor_controller.row_offset;
             if file_row >= self.editor_rows.number_of_rows() {
                 if self.editor_rows.number_of_rows() == 0 && i == screen_rows / 3 {
-                    let mut welcome = format!("Rubicon Editor --- Version {}", VERSION);
+                    let mut welcome = format!("Pound Editor --- Version {}", VERSION);
                     if welcome.len() > screen_columns {
                         welcome.truncate(screen_columns)
                     }
@@ -464,6 +486,7 @@ impl Reader {
 struct Editor {
     reader: Reader,
     output: Output,
+    quit_times: u8,
 }
 
 impl Editor {
@@ -471,6 +494,7 @@ impl Editor {
         Self {
             reader: Reader,
             output: Output::new(),
+            quit_times: QUIT_TIMES,
         }
     }
 
@@ -479,7 +503,17 @@ impl Editor {
             KeyEvent {
                 code: KeyCode::Char('q'),
                 modifiers: KeyModifiers::CONTROL, ..
-            } => return Ok(false),
+            } => {
+                if self.output.dirty > 0 && self.quit_times > 0 {
+                    self.output.status_message.set_message(format!(
+                        "WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.",
+                        self.quit_times
+                    ));
+                    self.quit_times -= 1;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
             KeyEvent {
                 code:
                     direction
@@ -513,7 +547,6 @@ impl Editor {
                     });
                 })
             }
-            /* modify */
             KeyEvent {
                 code: KeyCode::Char('s'),
                 modifiers: KeyModifiers::CONTROL, ..
@@ -521,8 +554,17 @@ impl Editor {
                 self.output
                     .status_message
                     .set_message(format!("{} bytes written to disk", len));
+                self.output.dirty = 0
             })?,
-            /* end */
+             KeyEvent {
+                code: key @ (KeyCode::Backspace | KeyCode::Delete),
+                modifiers: KeyModifiers::NONE, ..
+            } => {
+                if matches!(key, KeyCode::Delete) {
+                    self.output.move_cursor(KeyCode::Right)
+                }
+                self.output.delete_char()
+            }
             KeyEvent {
                 code: code @ (KeyCode::Char(..) | KeyCode::Tab),
                 modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT, ..
@@ -533,6 +575,7 @@ impl Editor {
             }),
             _ => {}
         }
+        self.quit_times = QUIT_TIMES;
         Ok(true)
     }
 
