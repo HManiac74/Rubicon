@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{cmp, env, fs, io};
 
-const VERSION: &str = "0.8";
+const VERSION: &str = "0.9";
 const TAB_STOP: usize = 8;
 const QUIT_TIMES: u8 = 3;
 
@@ -18,6 +18,54 @@ impl Drop for CleanUp {
         terminal::disable_raw_mode().expect("Unable to disable raw mode");
         Output::clear_screen().expect("error");
     }
+}
+
+#[macro_export]
+macro_rules! prompt {
+    ($output:expr,$($args:tt)*) => {{
+        let output:&mut Output = $output;
+        let mut input = String::with_capacity(32);
+        loop {
+            output.status_message.set_message(format!($($args)*, input));
+            output.refresh_screen()?;
+            match Reader.read_key()? {
+                KeyEvent {
+                    code:KeyCode::Enter,
+                    modifiers:KeyModifiers::NONE, ..
+                } => {
+                    if !input.is_empty() {
+                        output.status_message.set_message(String::new());
+                        break;
+                    }
+                }
+                KeyEvent {
+                    code: KeyCode::Esc,
+                    ..
+                } => {
+                    output.status_message.set_message(String::new());
+                    input.clear();
+                    break;
+                }
+                KeyEvent {
+                    code: KeyCode::Backspace | KeyCode::Delete,
+                    modifiers: KeyModifiers::NONE, ..
+                } =>  {
+                    input.pop();
+                }
+                KeyEvent {
+                    code: code @ (KeyCode::Char(..) | KeyCode::Tab),
+                    modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT, ..
+                } => input.push(match code {
+                        KeyCode::Tab => '\t',
+                        KeyCode::Char(ch) => ch,
+                        _ => unreachable!(),
+                    }),
+
+                _=> {}
+            }
+        }
+        if input.is_empty() { None } else { Some (input) }
+    }};
 }
 
 struct StatusMessage {
@@ -154,7 +202,7 @@ impl EditorRows {
         self.row_contents.insert(at, new_row);
     }
 
-    fn save(&self) -> io::Result<usize> {
+    fn save(&mut self) -> io::Result<usize> {
         match &self.filename {
             None => Err(io::Error::new(ErrorKind::Other, "no file name specified")),
             Some(name) => {
@@ -459,7 +507,7 @@ impl Output {
             let file_row = i + self.cursor_controller.row_offset;
             if file_row >= self.editor_rows.number_of_rows() {
                 if self.editor_rows.number_of_rows() == 0 && i == screen_rows / 3 {
-                    let mut welcome = format!("Pound Editor --- Version {}", VERSION);
+                    let mut welcome = format!("Rubicon Editor --- Version {}", VERSION);
                     if welcome.len() > screen_columns {
                         welcome.truncate(screen_columns)
                     }
@@ -592,12 +640,25 @@ impl Editor {
             KeyEvent {
                 code: KeyCode::Char('s'),
                 modifiers: KeyModifiers::CONTROL, ..
-            } => self.output.editor_rows.save().map(|len| {
-                self.output
-                    .status_message
-                    .set_message(format!("{} bytes written to disk", len));
-                self.output.dirty = 0
-            })?,
+            } => {
+                if matches!(self.output.editor_rows.filename, None) {
+                    let prompt = prompt!(&mut self.output, "Save as : {} (ESC to cancel)")
+                        .map(|it| it.into());
+                    if let None = prompt {
+                        self.output
+                            .status_message
+                            .set_message("Save Aborted".into());
+                        return Ok(true);
+                    }
+                    self.output.editor_rows.filename = prompt
+                }
+                self.output.editor_rows.save().map(|len| {
+                    self.output
+                        .status_message
+                        .set_message(format!("{} bytes written to disk", len));
+                    self.output.dirty = 0
+                })?;
+            }
             KeyEvent {
                 code: key @ (KeyCode::Backspace | KeyCode::Delete),
                 modifiers: KeyModifiers::NONE, ..
@@ -607,6 +668,10 @@ impl Editor {
                 }
                 self.output.delete_char()
             }
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE, ..
+            } => self.output.insert_newline(),
             KeyEvent {
                 code: code @ (KeyCode::Char(..) | KeyCode::Tab),
                 modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT, ..
