@@ -2,12 +2,12 @@ use crossterm::event::*;
 use crossterm::terminal::ClearType;
 use crossterm::{cursor, event, execute, queue, style, terminal};
 use std::cmp::Ordering;
-use std::io::{stdout, Write};
+use std::io::{stdout, ErrorKind, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{cmp, env, fs, io};
 
-const VERSION: &str = "0.7";
+const VERSION: &str = "0.8";
 const TAB_STOP: usize = 8;
 
 struct CleanUp;
@@ -50,19 +50,26 @@ impl StatusMessage {
     }
 }
 
+#[derive(Default)]
 struct Row {
-    row_content: Box<str>,
+    row_content: String,
     render: String,
 }
 
 impl Row {
-    fn new(row_content: Box<str>, render: String) -> Self {
+    fn new(row_content: String, render: String) -> Self {
         Self {
             row_content,
             render,
         }
     }
+
+    fn insert_char(&mut self, at: usize, ch: char) {
+        self.row_content.insert(at, ch);
+        EditorRows::render_row(self)
+    }
 }
+
 struct EditorRows {
     row_contents: Vec<Row>,
     filename: Option<PathBuf>,
@@ -110,6 +117,10 @@ impl EditorRows {
         &self.row_contents[at]
     }
 
+    fn get_editor_row_mut(&mut self, at: usize) -> &mut Row {
+        &mut self.row_contents[at]
+    }
+
     fn render_row(row: &mut Row) {
         let mut index = 0;
         let capacity = row
@@ -129,6 +140,28 @@ impl EditorRows {
                 row.render.push(c);
             }
         });
+    }
+
+    fn insert_row(&mut self) {
+        self.row_contents.push(Row::default());
+    }
+
+    fn save(&self) -> io::Result<usize> {
+        match &self.filename {
+            None => Err(io::Error::new(ErrorKind::Other, "no file name specified")),
+            Some(name) => {
+                let mut file = fs::OpenOptions::new().write(true).create(true).open(name)?;
+                let contents: String = self
+                    .row_contents
+                    .iter()
+                    .map(|it| it.row_content.as_str())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
+                file.set_len(contents.len() as u64)?;
+                file.write_all(contents.as_bytes())?;
+                Ok(contents.as_bytes().len())
+            }
+        }
     }
 }
 
@@ -288,7 +321,7 @@ impl Output {
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
             editor_rows: EditorRows::new(),
-            status_message: StatusMessage::new("HELP: Ctrl-Q = Quit".into()),
+            status_message: StatusMessage::new("HELP: Ctrl-S = Save | Ctrl-Q = Quit ".into()),
         }
     }
 
@@ -307,6 +340,16 @@ impl Output {
             self.editor_contents
                 .push_str(&msg[..cmp::min(self.win_size.0, msg.len())]);
         }
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
+            self.editor_rows.insert_row()
+        }
+        self.editor_rows
+            .get_editor_row_mut(self.cursor_controller.cursor_y)
+            .insert_char(self.cursor_controller.cursor_x, ch);
+        self.cursor_controller.cursor_x += 1;
     }
 
     fn draw_status_bar(&mut self) {
@@ -467,6 +510,24 @@ impl Editor {
                     });
                 })
             }
+            /* modify */
+            KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers: KeyModifiers::CONTROL, ..
+            } => self.output.editor_rows.save().map(|len| {
+                self.output
+                    .status_message
+                    .set_message(format!("{} bytes written to disk", len));
+            })?,
+            /* end */
+            KeyEvent {
+                code: code @ (KeyCode::Char(..) | KeyCode::Tab),
+                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT, ..
+            } => self.output.insert_char(match code {
+                KeyCode::Tab => '\t',
+                KeyCode::Char(ch) => ch,
+                _ => unreachable!(),
+            }),
             _ => {}
         }
         Ok(true)
