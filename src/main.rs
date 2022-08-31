@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use std::{cmp, env, fs, io};
 
-const VERSION: &str = "0.5";
+const VERSION: &str = "0.6";
 const TAB_STOP: usize = 8;
 
 struct CleanUp;
@@ -106,7 +106,7 @@ struct CursorController {
     screen_columns: usize,
     row_offset: usize,
     column_offset: usize,
-    render_x: usize, // add field
+    render_x: usize,
 }
 
 impl CursorController {
@@ -181,7 +181,11 @@ impl CursorController {
                     }
                 }
             }
-            KeyCode::End => self.cursor_x = self.screen_columns - 1,
+            KeyCode::End => {
+                if self.cursor_y < number_of_rows {
+                    self.cursor_x = editor_rows.get_row(self.cursor_y).len();
+                }
+            }
             KeyCode::Home => self.cursor_x = 0,
             _ => unimplemented!(),
         }
@@ -366,7 +370,6 @@ impl Editor {
                 code: val @ (KeyCode::PageUp | KeyCode::PageDown),
                 modifiers: KeyModifiers::NONE, ..
             } => {
-                /* add the following */
                 if matches!(val, KeyCode::PageUp) {
                     self.output.cursor_controller.cursor_y =
                         self.output.cursor_controller.row_offset
