@@ -525,7 +525,7 @@ impl Output {
                     if let Some(index) = index {
                         output.cursor_controller.cursor_y = row_index;
                         output.search_index.y_index = row_index;
-                        output.search_index.x_index = index; // add line
+                        output.search_index.x_index = index;
                         output.cursor_controller.cursor_x = row.get_row_content_x(index);
                         output.cursor_controller.row_offset = output.editor_rows.number_of_rows();
                         break;
