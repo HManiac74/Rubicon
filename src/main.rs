@@ -1,4 +1,5 @@
 use crossterm::event::*;
+use crossterm::style::*;
 use crossterm::terminal::ClearType;
 use crossterm::{cursor, event, execute, queue, style, terminal};
 use std::cmp::Ordering;
@@ -7,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{cmp, env, fs, io};
 
-const VERSION: &str = "0.9";
+const VERSION: &str = "1.0";
 const TAB_STOP: usize = 8;
 const QUIT_TIMES: u8 = 3;
 
@@ -77,8 +78,249 @@ macro_rules! prompt {
         } else {
             Some(input)
         }
-
     }};
+}
+
+#[derive(Copy, Clone)]
+enum HighlightType {
+    Normal,
+    Number,
+    SearchMatch,
+    String,
+    CharLiteral,
+    Comment,
+    MultilineComment,
+    Other(Color),
+}
+
+trait SyntaxHighlight {
+    fn extensions(&self) -> &[&str];
+    fn file_type(&self) -> &str;
+    fn comment_start(&self) -> &str;
+    fn multiline_comment(&self) -> Option<(&str, &str)>;
+    fn syntax_color(&self, highlight_type: &HighlightType) -> Color;
+    fn update_syntax(&self, at: usize, editor_rows: &mut Vec<Row>);
+    fn color_row(&self, render: &str, highlight: &[HighlightType], out: &mut EditorContents) {
+        let mut current_color = self.syntax_color(&HighlightType::Normal);
+        render.char_indices().for_each(|(i, c)| {
+            let color = self.syntax_color(&highlight[i]);
+            if current_color != color {
+                current_color = color;
+                let _ = queue!(out, SetForegroundColor(color));
+            }
+            out.push(c);
+        });
+        let _ = queue!(out, SetForegroundColor(Color::Reset));
+    }
+    fn is_separator(&self, c: char) -> bool {
+        c.is_whitespace()
+            || [
+                ',', '.', '[', ']', '(', ')', '+', '-', '/', '*', '=', '~', '%', '<', '>', '"',
+                '\'', ';', '&',
+            ]
+            .contains(&c)
+    }
+}
+
+syntax_struct! {
+    struct RustHighlight {
+        extensions:["rs"],
+        file_type:"rust",
+        comment_start:"//",
+        keywords : {
+            [Color::Yellow;
+                "mod","unsafe","extern","crate","use","type","struct","enum","union","const","static",
+                "mut","let","if","else","impl","trait","for","fn","self","Self", "while", "true","false",
+                "in","continue","break","loop","match"
+            ],
+            [Color::Magenta; "isize","i8","i16","i32","i64","usize","u8","u16","u32","u64","f32","f64",
+                "char","str","bool"
+            ]
+        },
+        multiline_comment: Some(("/*", "*/"))
+    }
+}
+
+#[macro_export]
+macro_rules! syntax_struct {
+    (
+        struct $Name:ident {
+            extensions:$ext:expr,
+            file_type:$type:expr,
+            comment_start:$start:expr,
+            keywords: {
+                $([$color:expr; $($words:expr),*]),*
+            },
+            multiline_comment:$ml_comment:expr
+        }
+    ) => {
+        struct $Name {
+            extensions: &'static [&'static str],
+            file_type: &'static str,
+            comment_start:&'static str,
+            multiline_comment:Option<(&'static str,&'static str)>
+        }
+
+        impl $Name {
+            fn new() -> Self {
+                Self {
+                    extensions: &$ext,
+                    file_type: $type,
+                    comment_start:$start,
+                    multiline_comment: $ml_comment
+                }
+            }
+        }
+
+        impl SyntaxHighlight for $Name {
+
+            fn comment_start(&self) -> &str {
+                self.comment_start
+            }
+
+            fn multiline_comment(&self) -> Option<(&str, &str)> {
+                self.multiline_comment
+            }
+
+            fn extensions(&self) -> &[&str] {
+                self.extensions
+            }
+
+            fn file_type(&self) -> &str {
+                self.file_type
+            }
+
+            fn syntax_color(&self, highlight_type: &HighlightType) -> Color {
+                match highlight_type {
+                    HighlightType::Normal => Color::Reset,
+                    HighlightType::Number => Color::Cyan,
+                    HighlightType::SearchMatch => Color::Blue,
+                    HighlightType::String => Color::Green,
+                    HighlightType::CharLiteral => Color::DarkGreen,
+                    HighlightType::Comment | HighlightType::MultilineComment => Color::DarkGrey,
+                    HighlightType::Other(color) => *color
+                }
+            }
+
+            fn update_syntax(&self, at: usize, editor_rows: &mut Vec<Row>) {
+                let mut in_comment = at > 0 && editor_rows[at - 1].is_comment;
+                let current_row = &mut editor_rows[at];
+                macro_rules! add {
+                    ($h:expr) => {
+                        current_row.highlight.push($h)
+                    };
+                }
+                current_row.highlight = Vec::with_capacity(current_row.render.len());
+                let render = current_row.render.as_bytes();
+                let mut i = 0;
+                let mut previous_separator = true;
+                let mut in_string: Option<char> = None;
+                let comment_start = self.comment_start().as_bytes();
+                while i < render.len() {
+                    let c = render[i] as char;
+                    let previous_highlight = if i > 0 {
+                        current_row.highlight[i - 1]
+                    } else {
+                        HighlightType::Normal
+                    };
+                    if in_string.is_none() && !comment_start.is_empty() && !in_comment {
+                        let end = i + comment_start.len();
+                        if render[i..cmp::min(end, render.len())] == *comment_start {
+                            (i..render.len()).for_each(|_| add!(HighlightType::Comment));
+                            break;
+                        }
+                    }
+                    if let Some(val) = $ml_comment {
+                        if in_string.is_none() {
+                            if in_comment {
+                                add!(HighlightType::MultilineComment);
+                                let end = i + val.1.len();
+                                if render[i..cmp::min(render.len(),end)] == *val.1.as_bytes() {
+                                    (0..val.1.len().saturating_sub(1)).for_each(|_| add!(HighlightType::MultilineComment));
+                                    i = end;
+                                    previous_separator = true;
+                                    in_comment = false;
+                                    continue
+                                } else {
+                                    i+=1;
+                                    continue
+                                }
+                            } else {
+                                let end = i + val.0.len();
+                                if render[i..cmp::min(render.len(),end)] == *val.0.as_bytes() {
+                                    (i..end).for_each(|_| add!(HighlightType::MultilineComment));
+                                    i+= val.0.len();
+                                    in_comment = true;
+                                    continue
+                                }
+                            }
+                        }
+                    }
+                    if let Some(val) = in_string {
+                        add! {
+                            if val == '"' { HighlightType::String } else { HighlightType::CharLiteral }
+                        }
+                        if c == '\\' && i + 1 < render.len() {
+                            add! {
+                                if val == '"' { HighlightType::String } else { HighlightType::CharLiteral }
+                            }
+                            i += 2;
+                            continue
+                        }
+                        if val == c {
+                            in_string = None;
+                        }
+                        i += 1;
+                        previous_separator = true;
+                        continue;
+                    } else if c == '"' || c == '\'' {
+                        in_string = Some(c);
+                        add! {
+                            if c == '"' { HighlightType::String } else { HighlightType::CharLiteral }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    if (c.is_digit(10)
+                        && (previous_separator
+                            || matches!(previous_highlight, HighlightType::Number)))
+                        || (c == '.' && matches!(previous_highlight, HighlightType::Number))
+                    {
+                        add!(HighlightType::Number);
+                        i += 1;
+                        previous_separator = false;
+                        continue;
+                    }
+                    if previous_separator {
+                        $(
+                            $(
+                                let end = i + $words.len();
+                                let is_end_or_sep = render
+                                    .get(end)
+                                    .map(|c| self.is_separator(*c as char))
+                                    .unwrap_or(end == render.len());
+                                if is_end_or_sep && render[i..end] == *$words.as_bytes() {
+                                    (i..end).for_each(|_| add!(HighlightType::Other($color)));
+                                    i += $words.len();
+                                    previous_separator = false;
+                                    continue;
+                                }
+                            )*
+                        )*
+                    }
+                    add!(HighlightType::Normal);
+                    previous_separator = self.is_separator(c);
+                    i += 1;
+                }
+                assert_eq!(current_row.render.len(), current_row.highlight.len());
+                let changed = current_row.is_comment != in_comment;
+                current_row.is_comment = in_comment;
+                if (changed && at + 1 < editor_rows.len()) {
+                    self.update_syntax(at+1,editor_rows)
+                }
+            }
+        }
+    };
 }
 
 struct StatusMessage {
@@ -112,10 +354,11 @@ impl StatusMessage {
     }
 }
 
-#[derive(Default)]
 struct Row {
     row_content: String,
     render: String,
+    highlight: Vec<HighlightType>,
+    is_comment: bool,
 }
 
 impl Row {
@@ -123,6 +366,8 @@ impl Row {
         Self {
             row_content,
             render,
+            highlight: Vec::new(),
+            is_comment: false,
         }
     }
 
@@ -157,28 +402,33 @@ struct EditorRows {
 }
 
 impl EditorRows {
-    fn new() -> Self {
+    fn new(syntax_highlight: &mut Option<Box<dyn SyntaxHighlight>>) -> Self {
         match env::args().nth(1) {
             None => Self {
                 row_contents: Vec::new(),
                 filename: None,
             },
-            Some(file) => Self::from_file(file.into()),
+            Some(file) => Self::from_file(file.into(), syntax_highlight),
         }
     }
 
-    fn from_file(file: PathBuf) -> Self {
+    fn from_file(file: PathBuf, syntax_highlight: &mut Option<Box<dyn SyntaxHighlight>>) -> Self {
         let file_contents = fs::read_to_string(&file).expect("Unable to read file");
+        let mut row_contents = Vec::new();
+        file.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| Output::select_syntax(ext).map(|syntax| syntax_highlight.insert(syntax)));
+        file_contents.lines().enumerate().for_each(|(i, line)| {
+            let mut row = Row::new(line.into(), String::new());
+            Self::render_row(&mut row);
+            row_contents.push(row);
+            if let Some(it) = syntax_highlight {
+                it.update_syntax(i, &mut row_contents)
+            }
+        });
         Self {
             filename: Some(file),
-            row_contents: file_contents
-                .lines()
-                .map(|it| {
-                    let mut row = Row::new(it.into(), String::new());
-                    Self::render_row(&mut row);
-                    row
-                })
-                .collect(),
+            row_contents,
         }
     }
 
@@ -188,10 +438,6 @@ impl EditorRows {
 
     fn get_row(&self, at: usize) -> &str {
         &self.row_contents[at].row_content
-    }
-
-    fn get_render(&self, at: usize) -> &String {
-        &self.row_contents[at].render
     }
 
     fn get_editor_row(&self, at: usize) -> &Row {
@@ -280,8 +526,9 @@ impl CursorController {
     }
 
     fn get_render_x(&self, row: &Row) -> usize {
-        row.row_content[..self.cursor_x]
+        row.row_content
             .chars()
+            .take(self.cursor_x)
             .fold(0, |render_x, c| {
                 if c == '\t' {
                     render_x + (TAB_STOP - 1) - (render_x % TAB_STOP) + 1
@@ -404,6 +651,7 @@ struct SearchIndex {
     y_index: usize,
     x_direction: Option<SearchDirection>,
     y_direction: Option<SearchDirection>,
+    previous_highlight: Option<(usize, Vec<HighlightType>)>,
 }
 
 impl SearchIndex {
@@ -413,6 +661,7 @@ impl SearchIndex {
             y_index: 0,
             x_direction: None,
             y_direction: None,
+            previous_highlight: None,
         }
     }
 
@@ -421,6 +670,7 @@ impl SearchIndex {
         self.x_index = 0;
         self.y_direction = None;
         self.x_direction = None;
+        self.previous_highlight = None
     }
 }
 
@@ -432,23 +682,32 @@ struct Output {
     status_message: StatusMessage,
     dirty: u64,
     search_index: SearchIndex,
+    syntax_highlight: Option<Box<dyn SyntaxHighlight>>,
 }
 
 impl Output {
+    fn select_syntax(extension: &str) -> Option<Box<dyn SyntaxHighlight>> {
+        let list: Vec<Box<dyn SyntaxHighlight>> = vec![Box::new(RustHighlight::new())];
+        list.into_iter()
+            .find(|it| it.extensions().contains(&extension))
+    }
+
     fn new() -> Self {
         let win_size = terminal::size()
             .map(|(x, y)| (x as usize, y as usize - 2))
             .unwrap();
+        let mut syntax_highlight = None;
         Self {
             win_size,
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
-            editor_rows: EditorRows::new(),
+            editor_rows: EditorRows::new(&mut syntax_highlight),
             status_message: StatusMessage::new(
                 "HELP: Ctrl-S = Save | Ctrl-Q = Quit | Ctrl-F = Find".into(),
             ),
             dirty: 0,
             search_index: SearchIndex::new(),
+            syntax_highlight,
         }
     }
 
@@ -458,6 +717,9 @@ impl Output {
     }
 
     fn find_callback(output: &mut Output, keyword: &str, key_code: KeyCode) {
+        if let Some((index, highlight)) = output.search_index.previous_highlight.take() {
+            output.editor_rows.get_editor_row_mut(index).highlight = highlight;
+        }
         match key_code {
             KeyCode::Esc | KeyCode::Enter => {
                 output.search_index.reset();
@@ -503,7 +765,7 @@ impl Output {
                     if row_index > output.editor_rows.number_of_rows() - 1 {
                         break;
                     }
-                    let row = output.editor_rows.get_editor_row(row_index);
+                    let row = output.editor_rows.get_editor_row_mut(row_index);
                     let index = match output.search_index.x_direction.as_ref() {
                         None => row.render.find(&keyword),
                         Some(dir) => {
@@ -523,6 +785,10 @@ impl Output {
                         }
                     };
                     if let Some(index) = index {
+                        output.search_index.previous_highlight =
+                            Some((row_index, row.highlight.clone()));
+                        (index..index + keyword.len())
+                            .for_each(|index| row.highlight[index] = HighlightType::SearchMatch);
                         output.cursor_controller.cursor_y = row_index;
                         output.search_index.y_index = row_index;
                         output.search_index.x_index = index;
@@ -568,11 +834,10 @@ impl Output {
         if self.cursor_controller.cursor_y == 0 && self.cursor_controller.cursor_x == 0 {
             return;
         }
-        let row = self
-            .editor_rows
-            .get_editor_row_mut(self.cursor_controller.cursor_y);
         if self.cursor_controller.cursor_x > 0 {
-            row.delete_char(self.cursor_controller.cursor_x - 1);
+            self.editor_rows
+                .get_editor_row_mut(self.cursor_controller.cursor_y)
+                .delete_char(self.cursor_controller.cursor_x - 1);
             self.cursor_controller.cursor_x -= 1;
         } else {
             let previous_row_content = self
@@ -582,6 +847,12 @@ impl Output {
             self.editor_rows
                 .join_adjacent_rows(self.cursor_controller.cursor_y);
             self.cursor_controller.cursor_y -= 1;
+        }
+        if let Some(it) = self.syntax_highlight.as_ref() {
+            it.update_syntax(
+                self.cursor_controller.cursor_y,
+                &mut self.editor_rows.row_contents,
+            );
         }
         self.dirty += 1;
     }
@@ -601,6 +872,16 @@ impl Output {
             EditorRows::render_row(current_row);
             self.editor_rows
                 .insert_row(self.cursor_controller.cursor_y + 1, new_row_content);
+            if let Some(it) = self.syntax_highlight.as_ref() {
+                it.update_syntax(
+                    self.cursor_controller.cursor_y,
+                    &mut self.editor_rows.row_contents,
+                );
+                it.update_syntax(
+                    self.cursor_controller.cursor_y + 1,
+                    &mut self.editor_rows.row_contents,
+                )
+            }
         }
         self.cursor_controller.cursor_x = 0;
         self.cursor_controller.cursor_y += 1;
@@ -616,6 +897,12 @@ impl Output {
         self.editor_rows
             .get_editor_row_mut(self.cursor_controller.cursor_y)
             .insert_char(self.cursor_controller.cursor_x, ch);
+        if let Some(it) = self.syntax_highlight.as_ref() {
+            it.update_syntax(
+                self.cursor_controller.cursor_y,
+                &mut self.editor_rows.row_contents,
+            )
+        }
         self.cursor_controller.cursor_x += 1;
         self.dirty += 1;
     }
@@ -636,7 +923,11 @@ impl Output {
         );
         let info_len = cmp::min(info.len(), self.win_size.0);
         let line_info = format!(
-            "{}/{}",
+            "{} | {}/{}",
+            self.syntax_highlight
+                .as_ref()
+                .map(|highlight| highlight.file_type())
+                .unwrap_or("no ft"),
             self.cursor_controller.cursor_y + 1,
             self.editor_rows.number_of_rows()
         );
@@ -676,11 +967,22 @@ impl Output {
                     self.editor_contents.push('~');
                 }
             } else {
-                let row = self.editor_rows.get_render(file_row);
+                let row = self.editor_rows.get_editor_row(file_row);
+                let render = &row.render;
                 let column_offset = self.cursor_controller.column_offset;
-                let len = cmp::min(row.len().saturating_sub(column_offset), screen_columns);
+                let len = cmp::min(render.len().saturating_sub(column_offset), screen_columns);
                 let start = if len == 0 { 0 } else { column_offset };
-                self.editor_contents.push_str(&row[start..start + len])
+                let render = render.chars().skip(start).take(len).collect::<String>();
+                self.syntax_highlight
+                    .as_ref()
+                    .map(|syntax_highlight| {
+                        syntax_highlight.color_row(
+                            &render,
+                            &row.highlight[start..start + len],
+                            &mut self.editor_contents,
+                        )
+                    })
+                    .unwrap_or_else(|| self.editor_contents.push_str(&render));
             }
             queue!(
                 self.editor_contents,
@@ -804,6 +1106,20 @@ impl Editor {
                             .set_message("Save Aborted".into());
                         return Ok(true);
                     }
+                    prompt
+                        .as_ref()
+                        .and_then(|path: &PathBuf| path.extension())
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| {
+                            Output::select_syntax(ext).map(|syntax| {
+                                let highlight = self.output.syntax_highlight.insert(syntax);
+                                for i in 0..self.output.editor_rows.number_of_rows() {
+                                    highlight
+                                        .update_syntax(i, &mut self.output.editor_rows.row_contents)
+                                }
+                            })
+                        });
+
                     self.output.editor_rows.filename = prompt
                 }
                 self.output.editor_rows.save().map(|len| {
