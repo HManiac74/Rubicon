@@ -1,7 +1,7 @@
 use crossterm::event::*;
 use crossterm::style::*;
 use crossterm::terminal::ClearType;
-use crossterm::{cursor, event, execute, queue, style, terminal};
+use crossterm::{cursor, execute, queue, terminal};
 use std::cmp::Ordering;
 use std::io::{stdout, ErrorKind, Write};
 use std::path::PathBuf;
@@ -622,14 +622,14 @@ impl EditorContents {
     }
 }
 
-impl io::Write for EditorContents {
+impl Write for EditorContents {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match std::str::from_utf8(buf) {
             Ok(s) => {
                 self.content.push_str(s);
                 Ok(s.len())
             }
-            Err(_) => Err(io::ErrorKind::WriteZero.into()),
+            Err(_) => Err(ErrorKind::WriteZero.into()),
         }
     }
 
@@ -909,7 +909,7 @@ impl Output {
 
     fn draw_status_bar(&mut self) {
         self.editor_contents
-            .push_str(&style::Attribute::Reverse.to_string());
+            .push_str(&Attribute::Reverse.to_string());
         let info = format!(
             "{} {} -- {} lines",
             self.editor_rows
@@ -941,7 +941,7 @@ impl Output {
             }
         }
         self.editor_contents
-            .push_str(&style::Attribute::Reset.to_string());
+            .push_str(&Attribute::Reset.to_string());
         self.editor_contents.push_str("\r\n");
     }
 
@@ -1020,8 +1020,8 @@ struct Reader;
 impl Reader {
     fn read_key(&self) -> crossterm::Result<KeyEvent> {
         loop {
-            if event::poll(Duration::from_millis(500))? {
-                if let Event::Key(event) = event::read()? {
+            if poll(Duration::from_millis(500))? {
+                if let Event::Key(event) = read()? {
                     return Ok(event);
                 }
             }
